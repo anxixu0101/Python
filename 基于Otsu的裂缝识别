@@ -1,0 +1,286 @@
+#%matplotlib qt5
+import numpy as np
+import cv2, time, math
+from scipy.signal import convolve2d as conv2
+from matplotlib import pyplot as plt
+#from bilateralfilt import bilatfilt
+#from dog import deroGauss
+from PIL import Image
+from PIL import ImageFilter
+import time
+
+import imutils
+
+from skimage import morphology, data, color
+from skimage import img_as_float
+from skimage import img_as_ubyte
+
+#
+
+
+ 
+# 创建一个txt文件，文件名为mytxtfile,并向文件写入msg
+def text_create(name, msg):
+    desktop_path = "D:\\"  # 新创建的txt文件的存放路径
+    full_path = desktop_path + name + '.txt'  # 也可以创建一个.doc的word文档
+    file = open(full_path, 'w')
+    file.write(msg)   #msg也就是下面的Hello world!
+    # file.close()
+ 
+#text_create('mytxtfile', '01')
+# 调用函数创建一个名为mytxtfile的.txt文件，并向其写入Hello world!
+#...........................................................................................
+def get_edges(I,sd):
+	dim = I.shape
+	Idog2d = np.zeros((nang,dim[0],dim[1]))
+	for i in range(nang):
+		dog2d = deroGauss(5,sd,angles[i])
+		Idog2dtemp = abs(conv2(I,dog2d,mode='same',boundary='fill'))
+		Idog2dtemp[Idog2dtemp<0]=0
+		Idog2d[i,:,:] = Idog2dtemp
+	return Idog2d
+ 
+#...........................................................................................
+def nonmaxsup(I,gradang):
+	dim = I.shape
+	Inms = np.zeros(dim)
+	xshift = int(np.round(math.cos(gradang*np.pi/180)))
+	yshift = int(np.round(math.sin(gradang*np.pi/180)))
+	Ipad = np.pad(I,(1,),'constant',constant_values = (0,0))
+	for r in range(1,dim[0]+1):
+		for c in range(1,dim[1]+1):
+			maggrad = [Ipad[r-xshift,c-yshift],Ipad[r,c],Ipad[r+xshift,c+yshift]]
+			if Ipad[r,c] == np.max(maggrad):
+				Inms[r-1,c-1] = Ipad[r,c]
+	return Inms
+#...........................................................................................
+def calc_sigt(I,threshval):
+	M,N = I.shape
+	ulim = np.uint8(np.max(I))
+	N1 = np.count_nonzero(I>threshval) #返回非零元素
+	N2 = np.count_nonzero(I<=threshval)
+	w1 = np.float64(N1)/(M*N)
+	w2 = np.float64(N2)/(M*N)
+	#print N1,N2,w1,w2
+	try:
+		u1 = np.sum(i*np.count_nonzero(np.multiply(I>i-0.5,I<=i+0.5))/N1 for i in range(threshval+1,ulim))
+		u2 = np.sum(i*np.count_nonzero(np.multiply(I>i-0.5,I<=i+0.5))/N2 for i in range(threshval+1))
+		uT = u1*w1+u2*w2
+		sigt = (w1+w2)*(u1-u2)**2
+		#print u1,u2,uT,sigt
+	except:
+		return 0
+	return sigt
+#...........................................................................................
+def get_threshold(I):
+	max_sigt = 0
+	opt_t = 0
+	ulim = np.uint8(np.max(I))
+	print(ulim)
+	for t in range(ulim+1):
+		sigt = calc_sigt(I,t)
+		#print t, sigt
+		if sigt > max_sigt:
+			max_sigt = sigt
+			opt_t = t
+	print ('optimal high threshold: ',opt_t)
+	return opt_t
+
+#...........................................................................................
+def threshold(I,uth):
+	lth = uth/2.5
+	Ith = np.zeros(I.shape)
+	Ith[I>=uth] = 255
+	Ith[I<lth] = 0
+	Ith[np.multiply(I>=lth, I<uth)] = 100
+	return Ith
+#...........................................................................................
+def hysteresis(I):
+	r,c = I.shape
+	#xshift = int(np.round(math.cos(gradang*np.pi/180)))
+	#yshift = int(np.round(math.sin(gradang*np.pi/180)))
+	Ipad = np.pad(I,(1,),'edge')
+	c255 = np.count_nonzero(Ipad==255)
+	imgchange = True
+	for i in range(1,r+1):
+		for j in range(1,c+1):
+			if Ipad[i,j] == 100:
+				#if Ipad[i-xshift,j+yshift]==255 or Ipad[i+xshift,j-yshift]==255:
+				if np.count_nonzero(Ipad[r-1:r+1,c-1:c+1]==255)>0:
+					Ipad[i,j] = 255
+				else:
+					Ipad[i,j] = 0
+	Ih = Ipad[1:r+1,1:c+1]
+	return Ih
+# 进行双边滤波模糊处理
+def bilatfilt(I,w,sd,sr):
+	dim = I.shape
+	Iout= np.zeros(dim)
+	#If the window is 5X5 then w = 5	
+	wlim = w//2
+	y,x = np.meshgrid(np.arange(-wlim,wlim+1),np.arange(-wlim,wlim+1))
+	#Geometric closeness
+	g = np.exp(-np.sum((np.square(x),np.square(y)),axis=0)/(2*(np.float64(sd)**2)))
+	#Photometric Similarity
+	Ipad = np.pad(I,(wlim,),'edge')
+	for r in range(wlim,dim[0]+wlim):
+		for c in range(wlim,dim[1]+wlim):
+			Ix = Ipad[r-wlim:r+wlim+1,c-wlim:c+wlim+1]
+			s = np.exp(-np.square(Ix-Ipad[r,c])/(2*(np.float64(sr)**2)))
+			k = np.multiply(g,s)
+			Iout[r-wlim,c-wlim] = np.sum(np.multiply(k,Ix))/np.sum(k)
+	return Iout
+
+
+# 高斯滤波
+def deroGauss(w=5,s=1,angle=0):
+	wlim = (w-1)/2
+	y,x = np.meshgrid(np.arange(-wlim,wlim+1),np.arange(-wlim,wlim+1))
+	G = np.exp(-np.sum((np.square(x),np.square(y)),axis=0)/(2*np.float64(s)**2))
+	G = G/np.sum(G)
+	dGdx = -np.multiply(x,G)/np.float64(s)**2
+	dGdy = -np.multiply(y,G)/np.float64(s)**2
+
+	angle = angle*math.pi/180 #converting to radians
+
+	dog = math.cos(angle)*dGdx + math.sin(angle)*dGdy
+
+	return dog
+
+# 构建一个函数判断是否有裂痕
+
+#...........................................................................................
+
+img = cv2.imread('E:\\777.jpg')
+plt.figure()
+plt.imshow(img)
+plt.show()
+plt.axis('off')
+
+while img.shape[0] > 1100 or img.shape[1] > 1100:
+    img = cv2.resize(img,None, fx=0.5,fy=0.5,interpolation = cv2.INTER_AREA)# 如果图片过大就缩放一下
+#tic = time.time()
+gimg = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)# 颜色空间转换，其实就是三通道换成2通道
+## 加入高斯模糊
+gimg = cv2.GaussianBlur(gimg, (9, 9), 5)
+
+img_1=cv2.Canny(gimg, 30, 35)
+stime = time.time()
+angles = [0,45,90,135]
+nang = len(angles)
+
+
+dim = img.shape
+
+print ('双边滤波器之后的图像\n')
+gimg = bilatfilt(gimg,5,3,10)
+plt.figure()
+plt.imshow(gimg)
+plt.show()
+plt.axis('off')
+
+#边缘检测，提取
+img_edges = get_edges(gimg,2)
+#x=np.max(gimg)
+
+# 经过双边滤波然后再提取边缘
+for n in range(nang):
+	img_edges[n,:,:] = nonmaxsup(img_edges[n,:,:],angles[n])
+print ('after nms: ', np.max(img_edges))
+img_edge = np.max(img_edges,axis=0)
+lim = np.uint8(np.max(img_edge))
+
+
+
+# 确定阈值
+th = get_threshold(img_edge)
+#the = get_threshold(img_edge)
+img_canny = cv2.Canny(np.uint8(img_edge),0.8*th,th)
+#img_canny = cv2.Canny(gimg,0.1*th,1.1*th)
+
+#边缘检测
+plt.figure()
+plt.imshow(img_edge)
+plt.show()
+plt.axis('off')
+#自适应canny检测之后
+plt.figure()
+plt.imshow(img_canny)
+plt.show()
+plt.axis('off')
+# 这个是老版canny检测 用来做对比的
+plt.figure()
+plt.imshow(img_1)
+plt.show()
+plt.axis('off')
+
+
+
+### 开始判断是否有裂缝
+#image = img
+# 
+#(h, w, d) = image.shape
+#print("width={}, height={}, depth={}".format(w, h, d))
+#
+# 
+## 2.图像灰度化
+#gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+#gray_copy = image.copy()
+#
+# 
+## 3.对比度增强
+#cache = cv2.createCLAHE(3, (8, 8))
+#dst = cache.apply(gray)
+#
+# 
+## 4.高斯平滑(降噪)
+#gauss = cv2.GaussianBlur(image, (3, 3), 0)
+#
+# 
+## 5.Canny算子边缘检测
+#canny = cv2.Canny(gauss, 75, 255)
+#
+# 
+## 6.形态学操作，连接相同裂纹
+## kener核
+#kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+## 膨胀图像
+#dilated = cv2.dilate(canny, kernel, iterations=1)
+#cv2.imshow("Dilated Image", dilated)
+## 腐蚀图像
+#erode = cv2.erode(canny, kernel, iterations=1)
+#
+## 闭运算
+#closed = cv2.morphologyEx(dilated, cv2.MORPH_CLOSE, kernel)
+#
+# 
+## 7.寻找最大连通域
+## 寻找图像的轮廓
+#contours= cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+#contours=contours[1]
+## 圈出图像轮廓
+##cv2.drawContours(closed, contours, -1, (0, 255, 255), 1)
+#cv2.imshow('contours', closed)
+## 连通域
+##无裂缝
+#area = []
+#for index in range(len(contours)):
+#    area.append(cv2.contourArea(contours[index]))
+#if area==[]:
+#    print ('没有识别到裂缝 ')
+#    M=1
+#    text_create('mytxtfile', '01')
+#    
+## 有裂缝
+#if area!=[]:  
+#    print ('检测到有裂缝了！')
+#    M=0
+#    text_create('mytxtfile', '10')
+#    max_index = np.argmax(area)
+#    max_area = cv2.contourArea(contours[max_index])
+## 填充连通域
+#    for index in range(len(contours)):
+#        if index != max_index:
+#            cv2.fillPoly(closed, [contours[index]], 0)
+#            cv2.imshow('connect area', closed)
+
